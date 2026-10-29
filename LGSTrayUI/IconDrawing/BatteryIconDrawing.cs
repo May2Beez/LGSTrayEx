@@ -253,17 +253,27 @@ public static partial class BatteryIconDrawing
         int size = (int)Math.Round(16 * GetDpiForSystem() / 96.0);
         int width = size;
         int height = size;
-
-        bool isOnline = device.IsVisuallyOnline && device.BatteryPercentage >= 0;
-        bool showBar = _enableBatteryBar && isOnline;
+        float dpiScale = size / 16f;
 
         using Bitmap bitmap = new(width, height);
         using (Graphics g = Graphics.FromImage(bitmap))
         {
+            // High quality compositing avoids dark halos on transparent backgrounds
+            g.CompositingQuality = CompositingQuality.HighQuality;
+
+            // "AntiAliasGridFit" is the magic setting. 
+            // It aligns text to the pixel grid (sharpness) but smooths edges.
+            // Note: Do NOT use ClearType on transparent backgrounds; it creates ugly black fringes.
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+
+
             bool isCharging = device.PowerSupplyStatus == PowerSupplyStatus.CHARGING;
 
             // Draw battery bar if enabled
-            if (showBar)
+            if (_enableBatteryBar && device.IsVisuallyOnline && device.BatteryPercentage >= 0)
             {
                 Color barColor = device.DeviceType switch
                 {
@@ -277,7 +287,8 @@ public static partial class BatteryIconDrawing
                 g.FillRectangle(bgBrush, 0, height - 2, (int)Math.Round(device.BatteryPercentage / 100 * width), 2);
             }
 
-            // Text color, charging is shown in green
+            // Font style and color
+            FontStyle fontStyle = isCharging ? FontStyle.Bold : FontStyle.Regular;
             Color textColor;
 
             if (CheckTheme.LightTheme)
@@ -289,16 +300,21 @@ public static partial class BatteryIconDrawing
                 textColor = isCharging ? Color.LightGreen : Color.White;
             }
 
-            string text = isOnline ? $"{device.BatteryPercentage:f0}" : "?";
+            // Font size 
+            float emSize = height * 0.7f;
+            using Font font = new("Segoe UI Variable", emSize, fontStyle, GraphicsUnit.Pixel);
+            string text = (!device.IsVisuallyOnline || device.BatteryPercentage < 0) ? "?" : $"{device.BatteryPercentage:f0}";
 
-            // Fill the space above the bar, keeping a 1px gap to it
-            Size textArea = new(width, showBar ? height - 3 : height);
-            using Bitmap glyphs = RenderFittedText(text, textColor, textArea, out Rectangle ink);
+            // Text Centering
+            SizeF textSize = g.MeasureString(text, font);
+            float x = (width - textSize.Width) / 2;
+            float y = (height - textSize.Height) / 2;
 
-            // Center the glyph pixels on whole-pixel offsets so they stay on the pixel grid
-            int x = (textArea.Width - ink.Width) / 2;
-            int y = (textArea.Height - ink.Height) / 2;
-            g.DrawImage(glyphs, new Rectangle(x, y, ink.Width, ink.Height), ink, GraphicsUnit.Pixel);
+            // Fine-tune adjustment            
+            y += 1 * dpiScale;
+
+            using Brush textBrush = new SolidBrush(textColor);
+            g.DrawString(text, font, textBrush, x, y);
         }
 
         // Icon
@@ -313,69 +329,6 @@ public static partial class BatteryIconDrawing
         // Cleanup
         DestroyIcon(iconHandle);
         oldIcon?.Dispose();
-    }
-
-    /// <summary>
-    /// Renders text at the largest font size whose glyph pixels fit within the given area.
-    /// </summary>
-    /// <param name="ink">Bounds of the drawn glyph pixels within the returned bitmap.</param>
-    private static Bitmap RenderFittedText(string text, Color color, Size area, out Rectangle ink)
-    {
-        // Oversized canvas so glyphs that don't fit yet are measured rather than clipped
-        int canvas = area.Width * 4;
-        using Brush brush = new SolidBrush(color);
-
-        for (float emSize = area.Height * 1.5f; ; emSize -= 0.5f)
-        {
-            Bitmap glyphs = new(canvas, canvas, PixelFormat.Format32bppArgb);
-            using (Graphics g = Graphics.FromImage(glyphs))
-            {
-                // Bold aliased glyphs stay crisp at tray sizes and need no transparent-edge blending.
-                // Note: Do NOT use ClearType on transparent backgrounds; it creates ugly black fringes.
-                g.TextRenderingHint = TextRenderingHint.SingleBitPerPixelGridFit;
-                using Font font = new("Segoe UI", emSize, FontStyle.Bold, GraphicsUnit.Pixel);
-                g.DrawString(text, font, brush, canvas / 8f, canvas / 8f, StringFormat.GenericTypographic);
-            }
-
-            ink = GetInkBounds(glyphs);
-            if ((ink.Width <= area.Width && ink.Height <= area.Height) || emSize <= 4)
-                return glyphs;
-
-            glyphs.Dispose();
-        }
-    }
-
-    private static Rectangle GetInkBounds(Bitmap bitmap)
-    {
-        BitmapData data = bitmap.LockBits(new Rectangle(0, 0, bitmap.Width, bitmap.Height),
-            ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-        try
-        {
-            int left = bitmap.Width, top = bitmap.Height, right = -1, bottom = -1;
-            int[] row = new int[bitmap.Width];
-
-            for (int y = 0; y < bitmap.Height; y++)
-            {
-                Marshal.Copy(data.Scan0 + y * data.Stride, row, 0, row.Length);
-                for (int x = 0; x < row.Length; x++)
-                {
-                    // Skip fully transparent pixels
-                    if (row[x] >>> 24 == 0)
-                        continue;
-
-                    left = Math.Min(left, x);
-                    right = Math.Max(right, x);
-                    top = Math.Min(top, y);
-                    bottom = Math.Max(bottom, y);
-                }
-            }
-
-            return right < 0 ? Rectangle.Empty : Rectangle.FromLTRB(left, top, right + 1, bottom + 1);
-        }
-        finally
-        {
-            bitmap.UnlockBits(data);
-        }
     }
 
 }
